@@ -1,4 +1,4 @@
-﻿/* app.js - Control de Gastos v1 */
+/* app.js - Control de Gastos v1 */
 (async function(){
   const appEl = document.getElementById("app");
   const loadingEl = document.getElementById("loading");
@@ -43,6 +43,8 @@
     settings: null,
     route: "panel",
     periodOffset: 0, // 0 = periodo actual, -1 anterior, +1 siguiente
+    range: { enabled:false, startYMD:"", endYMD:"" }, // rango personalizado (inclusive)
+    rangeDraft: { startYMD:"", endYMD:"" }, // valores del selector antes de aplicar
     cache: {
       tx: [],
       tr: []
@@ -166,6 +168,154 @@
     return `${a} – ${b}`;
   }
 
+
+  // ---------- Date range (inicio/fin) ----------
+  function dateToYMD(d){
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const da = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${da}`;
+  }
+
+  function ymdToDate(ymd){
+    const s = String(ymd||"").trim();
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(!m) return null;
+    const y = parseInt(m[1],10), mo = parseInt(m[2],10)-1, da = parseInt(m[3],10);
+    return new Date(y, mo, da, 0,0,0,0);
+  }
+
+  function addDays(d, n){
+    const x = new Date(d.getTime());
+    x.setDate(x.getDate()+n);
+    x.setHours(0,0,0,0);
+    return x;
+  }
+
+  function formatRangeLabel(startDate, endInclusiveDate){
+    const a = startDate.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"numeric"});
+    const b = endInclusiveDate.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit",year:"numeric"});
+    return `${a} – ${b}`;
+  }
+
+  // Rango activo para filtrar (end es EXCLUSIVO). Si no hay rango personalizado, usa el periodo configurado.
+  function activeRangeMeta(){
+    if(state.range?.enabled){
+      const sY = state.range.startYMD;
+      const eY = state.range.endYMD;
+      const sD = ymdToDate(sY);
+      const eD = ymdToDate(eY);
+      if(sD && eD){
+        const start = sD;
+        const endExclusive = addDays(eD, 1);
+        if(endExclusive.getTime() > start.getTime()){
+          return {
+            start,
+            end: endExclusive,
+            label: formatRangeLabel(start, eD),
+            startYMD: sY,
+            endYMD: eY,
+            isCustom: true
+          };
+        }
+      }
+    }
+    const base = currentPeriodRange();
+    const start = base.start;
+    const end = base.end; // exclusivo
+    const endInc = addDays(end, -1);
+    return {
+      start,
+      end,
+      label: periodLabel(base),
+      startYMD: dateToYMD(start),
+      endYMD: dateToYMD(endInc),
+      isCustom: false
+    };
+  }
+
+  function ensureRangeDraft(){
+    const meta = activeRangeMeta();
+    if(!state.rangeDraft) state.rangeDraft = {startYMD:"", endYMD:""};
+    if(!state.rangeDraft.startYMD || !state.rangeDraft.endYMD){
+      state.rangeDraft.startYMD = meta.startYMD;
+      state.rangeDraft.endYMD = meta.endYMD;
+    }
+    return meta;
+  }
+
+  function resetRangeToCurrentPeriod(){
+    state.range.enabled = false;
+    state.periodOffset = 0;
+    const meta = activeRangeMeta();
+    state.rangeDraft.startYMD = meta.startYMD;
+    state.rangeDraft.endYMD = meta.endYMD;
+  }
+
+  function rangeControls(){
+    const meta = ensureRangeDraft();
+
+    const startInp = U.el("input",{class:"input", type:"date", style:"max-width:160px"});
+    const endInp = U.el("input",{class:"input", type:"date", style:"max-width:160px"});
+    startInp.value = state.rangeDraft.startYMD;
+    endInp.value = state.rangeDraft.endYMD;
+
+    startInp.addEventListener("input", ()=>{ state.rangeDraft.startYMD = startInp.value; });
+    endInp.addEventListener("input", ()=>{ state.rangeDraft.endYMD = endInp.value; });
+
+    const applyBtn = U.el("button",{class:"btn small", text:"Aplicar"});
+    const resetBtn = U.el("button",{class:"btn small", text:"Periodo"});
+
+    applyBtn.onclick = ()=>{
+      const sD = ymdToDate(state.rangeDraft.startYMD);
+      const eD = ymdToDate(state.rangeDraft.endYMD);
+      if(!sD || !eD){ U.toast("Elige fecha inicio y fecha fin."); return; }
+      if(eD.getTime() < sD.getTime()){ U.toast("La fecha fin no puede ser anterior a inicio."); return; }
+      state.range.enabled = true;
+      state.range.startYMD = state.rangeDraft.startYMD;
+      state.range.endYMD = state.rangeDraft.endYMD;
+      render();
+    };
+
+    resetBtn.onclick = ()=>{
+      resetRangeToCurrentPeriod();
+      render();
+    };
+
+    const badge = U.el("div",{class:"badge", text: meta.label});
+    return U.el("div",{class:"row", style:"gap:8px; flex-wrap:wrap; align-items:flex-end"},[
+      U.el("div",{},[U.el("div",{class:"tiny muted",text:"Inicio"}), startInp]),
+      U.el("div",{},[U.el("div",{class:"tiny muted",text:"Fin"}), endInp]),
+      applyBtn,
+      resetBtn,
+      badge
+    ]);
+  }
+
+  function capFactorForActiveRange(){
+    const meta = activeRangeMeta();
+    let factor = 0;
+    let cursor = new Date(meta.start.getTime());
+    cursor.setHours(0,0,0,0);
+
+    let p = periodRangeFor(cursor, 0);
+    let guard = 0;
+    while(p.start.getTime() < meta.end.getTime() && guard < 200){
+      guard++;
+      const os = Math.max(meta.start.getTime(), p.start.getTime());
+      const oe = Math.min(meta.end.getTime(), p.end.getTime());
+      if(oe > os){
+        const frac = (oe - os) / (p.end.getTime() - p.start.getTime());
+        factor += frac;
+      }
+      if(p.end.getTime() <= cursor.getTime()) break;
+      cursor = new Date(p.end.getTime());
+      cursor.setHours(0,0,0,0);
+      p = periodRangeFor(cursor, 0);
+    }
+    return factor;
+  }
+
   // ---------- Data helpers ----------
   function accounts(){ return state.settings.accounts || []; }
   function categories(){ return state.settings.categories || []; }
@@ -173,7 +323,7 @@
   function accById(id){ return accounts().find(a=>a.id===id) || null; }
 
   async function loadPeriodData(){
-    const {start,end} = currentPeriodRange();
+    const {start,end} = activeRangeMeta();
     const startMs = start.getTime();
     const endMs = end.getTime();
     const [tx, tr] = await Promise.all([
@@ -248,6 +398,50 @@
       map.set(tr.toAccountId, (map.get(tr.toAccountId)||0) + amt);
     }
     return map;
+  }
+
+
+  async function computeBalancesSnapshots(cutoffMsList){
+    const { tx, tr } = await loadAllData();
+    const cutoffs = Array.from(new Set((cutoffMsList||[]).map(x=>Number(x)).filter(x=>Number.isFinite(x)))).sort((a,b)=>a-b);
+
+    const events = [];
+    for(const t of tx) events.push({dateMs: Number(t.dateMs||0), kind:"tx", t});
+    for(const x of tr) events.push({dateMs: Number(x.dateMs||0), kind:"tr", tr:x});
+    events.sort((a,b)=>a.dateMs-b.dateMs);
+
+    const cur = new Map();
+    for(const a of accounts()) cur.set(a.id, Number(a.initialBalance||0));
+
+    const snaps = new Map();
+    let ci = 0;
+
+    function applyTx(t){
+      const id = t.accountId || "cash";
+      const amt = Number(t.amount||0);
+      const delta = (t.type==="income") ? amt : -amt;
+      cur.set(id, (cur.get(id)||0) + delta);
+    }
+    function applyTr(x){
+      const amt = Number(x.amount||0);
+      cur.set(x.fromAccountId, (cur.get(x.fromAccountId)||0) - amt);
+      cur.set(x.toAccountId, (cur.get(x.toAccountId)||0) + amt);
+    }
+
+    for(const ev of events){
+      while(ci < cutoffs.length && ev.dateMs >= cutoffs[ci]){
+        snaps.set(cutoffs[ci], new Map(cur));
+        ci++;
+      }
+      if(ev.kind==="tx") applyTx(ev.t);
+      else applyTr(ev.tr);
+    }
+    while(ci < cutoffs.length){
+      snaps.set(cutoffs[ci], new Map(cur));
+      ci++;
+    }
+
+    return { now: new Map(cur), snaps };
   }
 
   // ---------- UI helpers ----------
@@ -514,11 +708,12 @@
     return rows;
   }
 
-  function rowsBudget(txList){
+  function rowsBudget(txList, capFactor=1){
     const exp = groupByCategoryExpenses(txList);
     const rows = [["Categoría","Tope","Gastado","Restante"]];
     for(const c of categories().filter(x=>x.kind==="expense")){
-      const cap = ensureNum(state.settings.budgets?.[c.id] || 0);
+      const capBase = ensureNum(state.settings.budgets?.[c.id] || 0);
+      const cap = capBase ? (capBase * capFactor) : 0;
       const spent = ensureNum(exp.get(c.id)||0);
       const remaining = cap ? (cap - spent) : 0;
       rows.push([c.name, cap, spent, remaining]);
@@ -527,8 +722,8 @@
   }
 
   function panelWorkbook(){
-    const range = currentPeriodRange();
-    const label = periodLabel(range);
+    const meta = activeRangeMeta();
+    const label = meta.label;
     const txList = state.cache.tx;
     const trList = state.cache.tr;
     const sums = sumPeriod(txList);
@@ -577,8 +772,8 @@
   }
 
   function printPanel(){
-    const range = currentPeriodRange();
-    const label = periodLabel(range);
+    const meta = activeRangeMeta();
+    const label = meta.label;
     const txList = state.cache.tx;
     const trList = state.cache.tr;
     const sums = sumPeriod(txList);
@@ -603,7 +798,7 @@
   }
 
   function printMovements(){
-    const label = periodLabel(currentPeriodRange());
+    const label = activeRangeMeta().label;
     const rows = state.cache.tx.map(t=>[
       new Date(t.dateMs).toLocaleDateString("es-ES"),
       t.type==="income" ? "Ingreso" : "Gasto",
@@ -631,9 +826,16 @@
   }
 
   async function printAccounts(){
-    const label = periodLabel(currentPeriodRange());
-    const balances = await computeBalances();
-    const rows = accounts().map(a=>[a.name, U.money(balances.get(a.id)||0, state.settings.currency)]);
+    const meta = activeRangeMeta();
+    const label = meta.label;
+    const startMs = meta.start.getTime();
+    const endMs = meta.end.getTime();
+    const snap = await computeBalancesSnapshots([startMs, endMs]);
+    const balancesStart = snap.snaps.get(startMs) || new Map();
+    const balancesEnd = snap.snaps.get(endMs) || new Map();
+    const balancesNow = snap.now;
+
+const rows = accounts().map(a=>[a.name, U.money(balances.get(a.id)||0, state.settings.currency)]);
     const html = tableHtml(["Cuenta","Saldo actual"], rows, new Set([1]));
     Print.printHtml({title:"Cuentas", subtitle:`Saldo actual (histórico). Periodo visual: ${label}`, html});
   }
@@ -643,14 +845,14 @@
     setSubtitle("Resumen del periodo");
     await loadPeriodData();
 
-    const range = currentPeriodRange();
-    const label = periodLabel(range);
+    const meta = activeRangeMeta();
+    const label = meta.label;
     const txList = state.cache.tx;
     const trList = state.cache.tr;
     const sums = sumPeriod(txList);
 
     const head = sectionHeader("Panel", U.el("div",{class:"row", style:"gap:8px"},[
-      periodSwitcher(),
+      rangeControls(),
       printBtn(()=>printPanel()),
       exportBtn(()=>{ const wb = panelWorkbook(); XLSXMini.exportXLSX(wb); })
     ]));
@@ -743,8 +945,8 @@
     setSubtitle("Ingresos y gastos");
     await loadPeriodData();
 
-    const range = currentPeriodRange();
-    const label = periodLabel(range);
+    const meta = activeRangeMeta();
+    const label = meta.label;
 
     const filters = {
       q: "",
@@ -786,7 +988,7 @@
     });
 
     const head = sectionHeader("Movimientos", U.el("div",{class:"row", style:"gap:8px"},[
-      periodSwitcher(), printB, exportB, transferBtn, addBtn
+      rangeControls(), printB, exportB, transferBtn, addBtn
     ]));
 
     function matches(t, q){
@@ -863,27 +1065,34 @@
 
     renderList();
     return U.el("div",{},[head, filterCard, listNode]);
-  }
+    }
 
   async function viewPresupuesto(){
     setSubtitle("Topes por categoría");
-    await loadPeriodData();
 
+    // Presupuesto (Topes) es un ajuste: se define por categoría y no depende de un rango personalizado.
+    // Para el "gastado" usamos siempre el periodo actual configurado (mes natural o cobro-a-cobro).
     const range = currentPeriodRange();
     const label = periodLabel(range);
 
-    const head = sectionHeader("Presupuesto (Topes)", U.el("div",{class:"row", style:"gap:8px"},[
-      periodSwitcher(),
+    // Cargar datos del periodo (ignorando rango personalizado)
+    const startMs = range.start.getTime();
+    const endMs = range.end.getTime();
+    state.cache.tx = await DB.listTxByRange(state.db, startMs, endMs);
+    state.cache.tr = await DB.listTrByRange(state.db, startMs, endMs);
+    state.cache.loadedRange = { startMs, endMs };
+
+    const head = sectionHeader("Presupuesto (Topes)", U.el("div",{class:"row", style:"gap:8px;flex-wrap:wrap;justify-content:flex-end"},[
+      U.el("div",{class:"badge", text: label}),
       printBtn(()=>printBudget()),
       exportBtn(()=>{
         const rows = rowsBudget(state.cache.tx);
         XLSXMini.exportXLSX({
-          filename:`ControlGastos_Presupuesto_${label.replace(/\s+/g,"_")}.xlsx`,
+          filename:`presupuesto_${label.replace(/\s+/g,"_")}.xlsx`,
           sheets:[{name:"Presupuesto", rows, currencyCols:[1,2,3]}]
         });
       })
     ]));
-
     const txList = state.cache.tx;
     const exp = groupByCategoryExpenses(txList);
 
@@ -952,17 +1161,17 @@
   async function viewCuentas(){
     setSubtitle("Efectivo, Tarjeta y Banco");
     await loadPeriodData();
-    const range = currentPeriodRange();
-    const label = periodLabel(range);
+    const meta = activeRangeMeta();
+    const label = meta.label;
 
     const balances = await computeBalances();
 
     const head = sectionHeader("Cuentas", U.el("div",{class:"row", style:"gap:8px"},[
-      periodSwitcher(),
+      rangeControls(),
       printBtn(()=>printAccounts()),
       exportBtn(async ()=>{
         const rows = [["Cuenta","Saldo actual"]];
-        for(const a of accounts()) rows.push([a.name, ensureNum(balances.get(a.id)||0)]);
+        for(const a of accounts()) rows.push([a.name, ensureNum(balancesNow.get(a.id)||0)]);
         XLSXMini.exportXLSX({ filename:`ControlGastos_Cuentas_${label.replace(/\s+/g,"_")}.xlsx`, sheets:[{name:"Cuentas", rows, currencyCols:[1]}] });
       }),
       U.el("button",{class:"btn primary small", text:"Transferir", onclick: ()=> openTransferModal({})})
@@ -992,7 +1201,25 @@
         .sort((a,b)=>b.dateMs-a.dateMs);
 
       const content = U.el("div",{class:"col"},[
-        U.el("div",{class:"tiny muted", text:`Periodo: ${label}`}),
+        U.el("div",{class:"tiny muted", text:`Rango: ${label}`}),
+        U.el("div",{class:"grid cols2", style:"margin-top:8px"},[
+          U.el("div",{class:"kpi"},[
+            U.el("div",{class:"label",text:"Saldo inicio rango"}),
+            U.el("div",{class:"value",text:U.money((balancesStart.get(accountId)||0), state.settings.currency)})
+          ]),
+          U.el("div",{class:"kpi"},[
+            U.el("div",{class:"label",text:"Saldo fin rango"}),
+            U.el("div",{class:"value",text:U.money((balancesEnd.get(accountId)||0), state.settings.currency)})
+          ]),
+          U.el("div",{class:"kpi"},[
+            U.el("div",{class:"label",text:"Variación en rango"}),
+            U.el("div",{class:"value",text:U.money(((balancesEnd.get(accountId)||0) - (balancesStart.get(accountId)||0)), state.settings.currency)})
+          ]),
+          U.el("div",{class:"kpi"},[
+            U.el("div",{class:"label",text:"Saldo actual"}),
+            U.el("div",{class:"value",text:U.money((balancesNow.get(accountId)||0), state.settings.currency)})
+          ]),
+        ]),
         U.el("hr",{class:"sep"}),
         U.el("div",{class:"h2", text:"Movimientos"}),
       ]);
@@ -1266,14 +1493,12 @@
         const payload = await DB.exportAll(state.db);
         const text = JSON.stringify(payload,null,2);
 
-        // Clipboard API (puede fallar en file:// o sin permiso)
         if(navigator.clipboard && typeof navigator.clipboard.writeText==="function"){
           await navigator.clipboard.writeText(text);
           U.toast("JSON copiado al portapapeles.");
           return;
         }
 
-        // Fallback
         const ta = document.createElement("textarea");
         ta.value = text;
         ta.setAttribute("readonly","");
@@ -1327,7 +1552,6 @@
       }
     };
 
-    // Importar pegando texto JSON (útil en móvil cuando el selector de archivos no encuentra el .json)
     const pasteBtn = U.el("button",{class:"btn", text:"Pegar JSON (restaurar)"});
     pasteBtn.onclick = async ()=>{
       const ta = U.el("textarea",{
@@ -1370,6 +1594,7 @@
           applyTheme();
           U.toast("Backup restaurado.");
           state.periodOffset = 0;
+          state.range.enabled = false;
           modal.close();
           location.hash = "#/panel";
           await render();
@@ -1392,8 +1617,7 @@
         ])
       ])
     ]));
-
-    const wipeBtn = U.el("button",{class:"btn danger", text:"Borrar todos los datos"});
+const wipeBtn = U.el("button",{class:"btn danger", text:"Borrar todos los datos"});
     wipeBtn.onclick = async ()=>{
       const ok = await U.confirmDialog({title:"Borrar todo", message:"Esto borrará todos los movimientos, transferencias y ajustes. Acción irreversible. ¿Continuar?", okText:"Borrar", cancelText:"Cancelar"});
       if(!ok) return;
